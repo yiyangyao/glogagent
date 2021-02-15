@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"glogagent/config"
 	"glogagent/kafka"
+	"glogagent/tailer"
 	"time"
+
+	"github.com/hpcloud/tail"
 
 	"github.com/Shopify/sarama"
 
@@ -12,8 +15,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// TODO: 1) 收集指定目录下的日志文件，发送到 kafka
-
+// TODO: 收集指定目录下的日志文件，发送到 kafka
 func main() {
 	var config0 = new(config.Config)
 	// 0. 读取配置文件
@@ -23,7 +25,7 @@ func main() {
 		return
 	}
 	logrus.Infof("kafka addr: %+v", config0)
-	// 1. 初始化
+	// 1. 初始化kafka
 	kfkProducer, err := kafka.InitSyncProducer(config0.KafkaConfig)
 	if err != nil {
 		logrus.Errorf("kafka producer init err: %v", err)
@@ -31,19 +33,36 @@ func main() {
 	}
 	defer kfkProducer.Close()
 	logrus.Info("init kafka producer init success")
-	// 封装消息
-	msg := &sarama.ProducerMessage{}
-	msg.Topic = "glogagent-demo"
-	msg.Value = sarama.StringEncoder("kafka msg...")
 
-	// 发送消息
-	pid, offset, err := kfkProducer.SendMessage(msg)
+	// 2. 初始化 tailer
+	tailer0, err := tailer.Init(config0.Collect)
 	if err != nil {
-		fmt.Printf("send msg error: %v", err)
+		logrus.Errorf("tailer init err: %v", err)
 		return
 	}
-	fmt.Printf("partionId: %v, offset: %v", pid, offset)
-	time.Sleep(time.Second)
-	// 2. 根据配置中的日志路径使用tail去收集日志
-	// 3. 把日志通过sarama发送kafka
+	logrus.Info("tailer kafka producer init success")
+
+	/// 3. 把日志通过sarama发送kafka
+	var (
+		msg *tail.Line
+		ok  bool
+	)
+
+	for {
+		msg, ok = <-tailer0.Lines
+		if !ok {
+			fmt.Printf("tailer file close reopen, filename: %s\n", tailer0.Filename)
+			time.Sleep(time.Second)
+			continue
+		}
+		pid, offset, err := kfkProducer.SendMessage(&sarama.ProducerMessage{
+			Topic: "glogagent-demo",
+			Value: sarama.StringEncoder(msg.Text),
+		})
+		if err != nil {
+			fmt.Printf("send msg error: %v", err)
+			return
+		}
+		fmt.Printf("partionId: %v, offset: %v", pid, offset)
+	}
 }
